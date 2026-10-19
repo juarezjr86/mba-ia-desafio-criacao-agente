@@ -21,7 +21,7 @@ Registro contínuo do status de desenvolvimento, implementação dos módulos, v
 | 3 | Implementação & Verificação | Código em `src/`, `scripts/` | Concluída | Execução de `scripts/verificar_fluxo.py` 100% verde nos 15 passos. |
 | 4 | README Definitivo | `README.md` | Concluída | Seções Arquitetura, Garantias (com arquivos/linhas reais) e Como rodar estritamente conformes. |
 | 5 | Revisão Independente | Parecer de Auditoria | Concluída | Homologado e aprovado unanimemente por Gemini 4 Argon sem ressalvas. |
-| 6 | Entrega | Fork `devfullcycle/...` | Em Andamento | Commit f454fbe realizado na main; working tree limpo; aguardando URL do fork público para push. |
+| 6 | Entrega | Fork `devfullcycle/...` | Concluída | Fork público juarezjr86/mba-ia-desafio-criacao-agente publicado na main; remotos configurados; zero segredos. |
 
 ---
 
