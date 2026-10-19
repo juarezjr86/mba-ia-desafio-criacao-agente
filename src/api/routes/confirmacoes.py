@@ -1,11 +1,18 @@
 """Rota para resposta a confirmações pendentes (Garantia 1)."""
 
+import logging
 from typing import Any
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 
 from ...core.runtime import RuntimeManager
-from ...db.repositorio import consumir_confirmacao_pendente
+from ...db.repositorio import (
+    consumir_confirmacao_pendente,
+    obter_confirmacoes_pendentes,
+    reverter_confirmacao_pendente,
+)
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/sessoes", tags=["Confirmações"])
 
@@ -45,10 +52,18 @@ async def responder_confirmacao(
         )
 
     # Retoma a execução do fluxo no agente
-    resultado = await runtime.executar_confirmacao(
-        session_id=session_id,
-        confirmacao_info=confirmacao_info,
-        confirmado=payload.confirmado,
-    )
-
-    return resultado
+    try:
+        return await runtime.executar_confirmacao(
+            session_id=session_id,
+            confirmacao_info=confirmacao_info,
+            confirmado=payload.confirmado,
+        )
+    except Exception:
+        # A retomada falhou (quota, modelo indisponível...): devolve a pendência para o morador reenviar,
+        # em vez de deixá-la consumida e irrecuperável (409 no reenvio, ação nunca executada).
+        logger.exception("Falha ao retomar a confirmação %s da sessão %s", payload.id, session_id)
+        reverter_confirmacao_pendente(session_id=session_id, id_confirmacao=payload.id)
+        return {
+            "resposta": "Não consegui concluir agora. Responda a confirmação novamente em instantes.",
+            "confirmacoes_pendentes": obter_confirmacoes_pendentes(session_id),
+        }

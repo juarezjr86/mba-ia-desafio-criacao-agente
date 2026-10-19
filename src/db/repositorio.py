@@ -79,7 +79,7 @@ def verificar_disponibilidade_area(area_id: str, data: str) -> bool:
 def _gerar_codigo_reserva_unico(conn: sqlite3.Connection) -> str:
     """Gera código RSV-XXXX que nunca repete nenhum código histórico (ativo ou cancelado)."""
     while True:
-        # Gera número aleatório seguro de 4 dígitos entre 5000 e 9999
+        # Sorteia código e valida contra toda a tabela de reservas (ativas e canceladas)
         num = random.randint(5000, 9999)
         codigo = f"RSV-{num}"
         cursor = conn.execute("SELECT 1 FROM reservas WHERE codigo = ?;", (codigo,))
@@ -167,13 +167,19 @@ def autorizar_visitante(apartamento: str, nome: str, data: str) -> dict[str, Any
     with conectar() as conn:
         conn.execute("BEGIN IMMEDIATE;")
         criado_em = obter_timestamp()
-        conn.execute(
-            """
-            INSERT INTO visitantes (apartamento, nome, data, criado_em)
-            VALUES (?, ?, ?, ?);
-            """,
-            (str(apartamento), nome.strip(), data, criado_em),
-        )
+        # Idempotente: reexecução da mesma autorização (retomada após falha) não duplica o registro
+        existente = conn.execute(
+            "SELECT 1 FROM visitantes WHERE apartamento = ? AND nome = ? AND data = ?;",
+            (str(apartamento), nome.strip(), data),
+        ).fetchone()
+        if existente is None:
+            conn.execute(
+                """
+                INSERT INTO visitantes (apartamento, nome, data, criado_em)
+                VALUES (?, ?, ?, ?);
+                """,
+                (str(apartamento), nome.strip(), data, criado_em),
+            )
         conn.execute("COMMIT;")
         return {
             "apartamento": str(apartamento),
@@ -283,3 +289,14 @@ def consumir_confirmacao_pendente(session_id: str, id_confirmacao: str) -> dict[
             "acao": row["acao"],
             "detalhes": json.loads(row["detalhes"]),
         }
+
+
+def reverter_confirmacao_pendente(session_id: str, id_confirmacao: str) -> None:
+    """Devolve a pendência ao estado 'pendente' quando a retomada do Runner falhou, para permitir novo envio."""
+    with conectar() as conn:
+        conn.execute("BEGIN IMMEDIATE;")
+        conn.execute(
+            "UPDATE confirmacoes_pendentes SET status = 'pendente' WHERE session_id = ? AND id = ? AND status = 'respondida';",
+            (session_id, id_confirmacao),
+        )
+        conn.execute("COMMIT;")

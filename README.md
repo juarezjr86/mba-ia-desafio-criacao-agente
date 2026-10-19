@@ -64,7 +64,7 @@ A topologia é estruturada com um **Agente Principal** e **três Especialistas**
 ### Justificativa das Escolhas de Design
 
 - **Sub-agents vs. Agente Monolítico:** A separação em especialistas reduz a sobrecarga de contexto no prompt, previne alucinações cruzadas entre domínios distintos e garante que ferramentas sensíveis (gravação de reservas e liberação de acessos) só estejam acessíveis aos agentes competentes.
-- **Resiliência de Quota e Pooling de Modelos (`FallbackGemini` em `src/core/config.py`):** Para contornar os limites diários de requisições do Google AI Studio no plano gratuito (20 requisições/dia por modelo individual), implementamos a classe `FallbackGemini` que comuta automaticamente entre modelos compatíveis (`gemini-flash-latest`, `gemini-flash-lite-latest`, `gemini-3.7-flash`, `gemini-3.1-flash-lite`, `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite-preview`). Ao encontrar um erro `429` ou `503`, a requisição é redirecionada de forma transparente para o próximo modelo do pool, memorizando a instância ativa.
+- **Resiliência de Quota e Pooling de Modelos (`FallbackGemini` em `src/core/config.py`):** Para contornar os limites de requisições por modelo do plano gratuito do Google AI Studio (que variam por modelo e por conta), implementamos a classe `FallbackGemini` que comuta automaticamente entre modelos compatíveis (`gemini-flash-latest`, `gemini-flash-lite-latest`, `gemini-3.7-flash`, `gemini-3.1-flash-lite`, `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite-preview`). Ao encontrar um erro `429`, `503` ou modelo não encontrado (`NOT_FOUND`), a requisição é redirecionada de forma transparente para o próximo modelo do pool, memorizando a instância ativa.
 - **Persistência e Retomada (`ResumabilityConfig` em `src/core/runtime.py`):** O `App` é configurado com `ResumabilityConfig(is_resumable=True)`. Quando uma tool solicita confirmação humana, o sub-agente autor da chamada é identificado pelo ADK no momento da resposta no endpoint `/confirmacoes`, retomando o fluxo sem perder o estado.
 
 ---
@@ -153,7 +153,7 @@ Cada uma das cinco garantias do desafio é implementada estritamente no código 
         )
         conn.execute("COMMIT;")
     ```
-- **Por que não depende do modelo:** A verificação `taxa > 0` e o bloqueio de autorização de visitante acontecem em código Python puro antes de qualquer gravação. Caso o morador responda uma confirmação inexistente ou já consumida, a transação atômica em `consumir_confirmacao_pendente` não localiza registro com `status = 'pendente'` e devolve `None`, resultando imediatamente em `HTTP 409 Conflict`.
+- **Por que não depende do modelo:** A verificação `taxa > 0` e o bloqueio de autorização de visitante acontecem em código Python puro antes de qualquer gravação. Caso o morador responda uma confirmação inexistente ou já consumida, a transação atômica em `consumir_confirmacao_pendente` não localiza registro com `status = 'pendente'` e devolve `None`, resultando imediatamente em `HTTP 409 Conflict`. Se a retomada do Runner falhar depois de a pendência ser consumida (quota, modelo indisponível), `src/api/routes/confirmacoes.py` devolve a pendência a `pendente` (`reverter_confirmacao_pendente` em `src/db/repositorio.py`) e responde `200` com a pendência de volta na lista, para o morador reenviar. O reenvio não duplica o efeito: a reserva é barrada pelo índice único (Garantia 5) e a autorização de visitante é idempotente.
 
 ---
 
@@ -209,9 +209,7 @@ Cada uma das cinco garantias do desafio é implementada estritamente no código 
 - **Arquivo e Trecho no Código:**
   - `src/agents/principal.py` (constante `INSTRUCAO_PRINCIPAL`):
     ```python
-    # O agente principal não recebe o texto do regulamento nas instruções:
-    # "Você NÃO possui o texto do regulamento interno em suas instruções (Garantia 4).
-    # Qualquer dúvida normativa deve ser delegada ao Especialista em Regulamento."
+    2. Você NÃO possui o texto do regulamento interno em suas instruções (Garantia 4). Qualquer dúvida normativa deve ser delegada ao Especialista em Regulamento.
     ```
   - `src/tools/regulamento.py` (funções `_carregar_capitulos` e `consultar_regulamento`):
     ```python
@@ -279,12 +277,12 @@ Cada uma das cinco garantias do desafio é implementada estritamente no código 
     ```
   - `src/db/repositorio.py` (função `_gerar_codigo_reserva_unico`):
     ```python
-    # Sorteia código e valida contra toda a tabela de reservas (ativas e canceladas):
     while True:
+        # Sorteia código e valida contra toda a tabela de reservas (ativas e canceladas)
         num = random.randint(5000, 9999)
         codigo = f"RSV-{num}"
         cursor = conn.execute("SELECT 1 FROM reservas WHERE codigo = ?;", (codigo,))
-        if not cursor.fetchone():
+        if cursor.fetchone() is None:
             return codigo
     ```
 - **Por que não depende do modelo:** A exclusividade não depende de verificação prévia de agenda. O índice único atômico no SQLite impede a inserção concorrente no momento exato do `INSERT`. Caso ocorra colisão simultânea, o `IntegrityError` é tratado no repositório e a tool devolve `status: recusada`, resultando em resposta normal conversacional (HTTP 200). Os códigos de reserva são verificados contra todo o histórico do condomínio, impedindo reuso ou colisões.
@@ -307,8 +305,9 @@ cp .env.example .env
 Edite o arquivo `.env` inserindo sua chave:
 ```env
 GEMINI_API_KEY=sua_chave_do_google_ai_studio
-GOOGLE_API_KEY=sua_chave_do_google_ai_studio
 ```
+
+Opcionalmente, `MODELO_PRINCIPAL`, `MODELO_RESERVAS`, `MODELO_VISITANTES` e `MODELO_REGULAMENTO` trocam o modelo Gemini de cada agente (útil se algum modelo padrão não estiver disponível na sua conta; o fallback também alterna para o próximo modelo do pool em caso de 429, 503 ou modelo não encontrado).
 
 Instale as dependências sincronizando o lockfile:
 ```bash
@@ -332,8 +331,14 @@ uv run uvicorn src.api.app:app --host 0.0.0.0 --port 8000
 A API estará respondendo em `http://localhost:8000`.
 
 ### Execução do Script de Verificação do Avaliador (Passos 1 a 15)
-Com a API rodando, execute a suíte de testes ponta a ponta:
+Com a API rodando, execute os passos 1 a 12:
 
 ```bash
 uv run python scripts/verificar_fluxo.py
+```
+
+Pare a API (Ctrl+C), suba de novo com o mesmo comando, **sem restaurar os dados**, e execute os passos 13 a 15:
+
+```bash
+uv run python scripts/verificar_fluxo.py --apos-reinicio
 ```

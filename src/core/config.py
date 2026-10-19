@@ -62,9 +62,10 @@ class FallbackGemini(Gemini):
                     or "503" in err_str
                     or "RESOURCE_EXHAUSTED" in err_str
                     or "UNAVAILABLE" in err_str
+                    or "NOT_FOUND" in err_str  # modelo inexistente ou sem acesso na conta
                 ):
                     logger.warning(
-                        "Modelo %s indisponivel ou com quota esgotada (%s). Alternando para proximo modelo...",
+                        "Modelo %s indisponivel, sem acesso ou com quota esgotada (%s). Alternando para proximo modelo...",
                         m,
                         err_str[:60],
                     )

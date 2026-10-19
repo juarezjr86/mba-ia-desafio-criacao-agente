@@ -4,10 +4,12 @@ import asyncio
 import json
 from pathlib import Path
 import re
+import subprocess
 import sys
 import httpx
 
 BASE_URL = "http://localhost:8000"
+ESTADO = Path("dados_app/estado_fluxo.json")  # guarda S1 entre a fase 1 e a fase pos-reinicio
 
 
 class VerificadorFluxo:
@@ -195,9 +197,12 @@ class VerificadorFluxo:
         r = await self.client.post(f"/sessoes/{self.s2_id}/mensagens", json={"texto": msg})
         assert r.status_code == 200
         pendentes = r.json().get("confirmacoes_pendentes", [])
+        resposta_aprovacao = ""
         if pendentes:
             # Se gerou confirmacao pendente, aprova
-            await self.client.post(f"/sessoes/{self.s2_id}/confirmacoes", json={"id": pendentes[0]["id"], "confirmado": True})
+            r_aprov = await self.client.post(f"/sessoes/{self.s2_id}/confirmacoes", json={"id": pendentes[0]["id"], "confirmado": True})
+            assert r_aprov.status_code == 200
+            resposta_aprovacao = r_aprov.json().get("resposta", "")
 
         # Confere que o 101 NAO tem reserva em 2030-03-16
         r_101 = await self.client.get("/apartamentos/101/reservas")
@@ -207,7 +212,9 @@ class VerificadorFluxo:
         r_eventos = await self.client.get(f"/sessoes/{self.s2_id}/eventos")
         eventos_str = json.dumps(r_eventos.json())
         assert "RSV-4821" not in eventos_str
+        assert "RSV-4821" not in r.json().get("resposta", "") + resposta_aprovacao
         assert not re.search(r"\b302\b", r.json().get("resposta", ""))
+        assert not re.search(r"\b302\b", resposta_aprovacao)
 
         self.log(10, "Tentativa de reservar data ocupada pelo 302 recusada sem vazamento de dados.")
 
@@ -247,12 +254,15 @@ class VerificadorFluxo:
         r_eventos = await self.client.get(f"/sessoes/{self.s1_id}/eventos")
         eventos = r_eventos.json()
         self.s1_event_count_step12 = len(eventos)
-        eventos_str = json.dumps(eventos)
 
         # Nenhum evento contem trechos de outros capitulos
-        assert "Capítulo I:" not in eventos_str
-        assert "Capítulo X:" not in eventos_str
-        assert "Capítulo IX:" not in eventos_str
+        # (cabecalhos de todos os capitulos do regulamento, exceto o IV: Piscina; json.dumps escapa acentos)
+        eventos_txt = json.dumps(eventos, ensure_ascii=False)
+        cabecalhos = re.findall(r"(?m)^##\s+(Capítulo\s+[IVX]+):", Path("dados/regulamento.md").read_text(encoding="utf-8"))
+        assert len(cabecalhos) == 14, f"Cabecalhos inesperados no regulamento: {cabecalhos}"
+        for cab in cabecalhos:
+            if cab != "Capítulo IV":
+                assert f"{cab}:" not in eventos_txt, f"Evento contem trecho de outro capitulo: {cab}"
 
         self.log(12, f"Regulamento consultado cirurgicamente (Piscina: 20h, eventos={self.s1_event_count_step12}).")
 
@@ -271,6 +281,18 @@ class VerificadorFluxo:
         assert r_nova.status_code == 200
         r_eventos_novos = await self.client.get(f"/sessoes/{self.s1_id}/eventos")
         assert len(r_eventos_novos.json()) > self.s1_event_count_step12
+
+        # Confirmacao apos o reinicio: a pendencia nasce e e aprovada com a sessao persistida
+        r_conf = await self.client.post(
+            f"/sessoes/{self.s1_id}/mensagens", json={"texto": "Reserve o salão de festas para 2030-06-15."}
+        )
+        assert r_conf.status_code == 200
+        pend = r_conf.json().get("confirmacoes_pendentes", [])
+        assert len(pend) >= 1, "Reserva com taxa apos reinicio deve gerar confirmacao pendente!"
+        r_ok = await self.client.post(f"/sessoes/{self.s1_id}/confirmacoes", json={"id": pend[0]["id"], "confirmado": True})
+        assert r_ok.status_code == 200
+        r_101_pos = await self.client.get("/apartamentos/101/reservas")
+        assert sum(1 for r in r_101_pos.json() if r.get("area") == "salao-de-festas" and r.get("data") == "2030-06-15") == 1
 
         # Confere rotas de verificacao
         r_101 = await self.client.get("/apartamentos/101/reservas")
@@ -349,14 +371,49 @@ class VerificadorFluxo:
             pyproject = f.read()
         assert "google-adk[db]==2.9.1" in pyproject or "google-adk==" in pyproject
 
-        # 2. Arquivos de dados/ idênticos
-        # Conferido via git status
+        assert re.search(r"google-adk(\[[a-z]+\])?==\d+\.\d+\.\d+", pyproject), "ADK sem versao exata fixada"
+
+        # 2. Arquivos de dados/ identicos aos do repositorio base (upstream)
+        # (blob ids git dos 5 arquivos no repositorio base devfullcycle/mba-ia-desafio-criacao-agente;
+        # nao depende do remoto 'upstream', ausente num clone limpo do fork)
+        blobs_base = {
+            "apartamentos.json": "5c17ae3e2275b6c519936ed096809668c13b8633",
+            "areas.json": "242e1a550026bb9753d3d222e2dd793fa5e63ecf",
+            "regulamento.md": "46c5d1375d081875a15f2fa0a31ac96cc7533dd2",
+            "reservas.json": "e4d3f93680f54db28fb6e0ffa0c2b3fd980135c6",
+            "visitantes.json": "5d5a2cbc1010a89d7546b35c405b85a2d0089902",
+        }
+        for nome, blob in blobs_base.items():
+            atual = subprocess.run(["git", "hash-object", f"dados/{nome}"], capture_output=True, text=True).stdout.strip()
+            assert atual == blob, f"dados/{nome} difere do repositorio base"
+
+        # 3. .env fora do Git e nenhuma chave versionada
+        tracked = subprocess.run(["git", "ls-files"], capture_output=True, text=True).stdout.split()
+        assert ".env" not in tracked, ".env esta versionado"
+        for caminho in tracked:
+            p = Path(caminho)
+            if p.suffix in {".py", ".md", ".toml", ".example", ".json"} and p.is_file():
+                assert not re.search(r"AIza[0-9A-Za-z_-]{20,}", p.read_text(encoding="utf-8", errors="ignore")), f"Chave em {caminho}"
+
         self.log(15, "Repositorio conferido estaticamente com sucesso.")
 
 
 async def main():
+    """Uso: sem argumento roda os passos 1 a 12 e para; --apos-reinicio roda 13 a 15 (reinicie a API entre as duas)."""
     verificador = VerificadorFluxo()
     try:
+        if "--apos-reinicio" in sys.argv:
+            estado = json.loads(ESTADO.read_text(encoding="utf-8"))
+            verificador.s1_id = estado["s1_id"]
+            verificador.s1_event_count_step12 = estado["eventos_passo_12"]
+            print("Retomando apos o reinicio da API (passos 13 a 15)...")
+            await verificador.verificar_passo_13()
+            await asyncio.sleep(1.5)
+            await verificador.verificar_passo_14()
+            verificador.verificar_passo_15()
+            print("\n>>> PASSOS 13 A 15 APROVADOS COM SUCESSO! <<<")
+            return
+
         print("Iniciando verificacao dos passos 1 a 12...")
         await verificador.verificar_passo_1()
         await asyncio.sleep(1.0)
@@ -382,12 +439,13 @@ async def main():
         await asyncio.sleep(1.5)
         await verificador.verificar_passo_12()
         await asyncio.sleep(1.5)
-        print("\nPara validar o Passo 13, reinicie o servidor sem restaurar os dados.")
-        await verificador.verificar_passo_13()
-        await asyncio.sleep(1.5)
-        await verificador.verificar_passo_14()
-        verificador.verificar_passo_15()
-        print("\n>>> TODOS OS PASSOS (1 a 15) APROVADOS COM SUCESSO! <<<")
+        ESTADO.parent.mkdir(exist_ok=True)
+        ESTADO.write_text(
+            json.dumps({"s1_id": verificador.s1_id, "eventos_passo_12": verificador.s1_event_count_step12}),
+            encoding="utf-8",
+        )
+        print("\n>>> PASSOS 1 A 12 APROVADOS. Pare a API (Ctrl+C), suba de novo SEM restaurar e rode:")
+        print("    uv run python scripts/verificar_fluxo.py --apos-reinicio")
     finally:
         await verificador.fechar()
 

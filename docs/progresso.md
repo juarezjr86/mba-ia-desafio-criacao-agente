@@ -18,9 +18,9 @@ Registro contínuo do status de desenvolvimento, implementação dos módulos, v
 |---|---|---|---|---|
 | 1 | Pesquisa e Decisões | `docs/decisoes.md` | Concluída | Decisões D-01 a D-08 ratificadas (Opção A para todas). |
 | 2 | Planejamento da Arquitetura | `docs/plano.md` | Concluída | Contratos REST, schema SQLite com índice atômico, mapeamento das 5 garantias. |
-| 3 | Implementação & Verificação | Código em `src/`, `scripts/` | Concluída | Execução de `scripts/verificar_fluxo.py` 100% verde nos 15 passos. |
+| 3 | Implementação & Verificação | Código em `src/`, `scripts/` | Concluída | `scripts/verificar_fluxo.py` verde: passos 1 a 12; reinício real da API sem restaurar; passos 13 a 15 (`--apos-reinicio`, inclui aprovar confirmação após o reinício). |
 | 4 | README Definitivo | `README.md` | Concluída | Seções Arquitetura, Garantias (com arquivos/linhas reais) e Como rodar estritamente conformes. |
-| 5 | Revisão Independente | Parecer de Auditoria | Concluída | Homologado e aprovado unanimemente por Gemini 4 Argon sem ressalvas. |
+| 5 | Revisão Independente | Parecer de Auditoria | Concluída | Revisão do Fable (professor, somente leitura): APROVADO COM RESSALVAS. Ressalvas importantes tratadas (prompt do regulamento sem o horário da piscina, pendência revertida se a retomada falhar, fallback também em `NOT_FOUND`, script com reinício real) e reavaliadas em nova revisão. |
 | 6 | Entrega | Fork `devfullcycle/...` | Concluída | Fork público juarezjr86/mba-ia-desafio-criacao-agente publicado na main; remotos configurados; zero segredos. |
 
 ---
